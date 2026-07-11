@@ -1,0 +1,8 @@
+{
+  "name": "Remix: ChessArena",
+  "description": "Premium custom-stakes online chess platform with dynamic entry fees, 20% platform commission, instant secure matchmaking, wallet transaction engine, real-time multiplayer, move validation, and admin dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
