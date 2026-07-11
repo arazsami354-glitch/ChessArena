@@ -1,354 +1,344 @@
-import { useState, useEffect } from 'react';
-import { auth, db, collection, query, where, onSnapshot, doc, updateDoc, writeBatch, signOut } from '../firebase';
-import { UserProfile, UserNotification } from '../types';
+import React, { useState, useEffect } from 'react';
+import { db, collection, query, where, onSnapshot, doc, updateDoc, addDoc, runTransaction } from '../firebase';
+import { UserProfile, WalletTransaction } from '../types';
 import { 
-  Bell, Wallet, LogOut, ShieldAlert, Award, Globe, Check, Trash2, Menu, X
+  TrendingUp, TrendingDown, RefreshCw, ArrowUpRight, ArrowDownLeft, ShieldCheck, CheckCircle2, AlertCircle, Clock
 } from 'lucide-react';
 
-interface NavbarProps {
+interface WalletSectionProps {
   userProfile: UserProfile | null;
-  onOpenAuth: () => void;
-  onOpenWallet: () => void;
-  onOpenAdmin: () => void;
-  onOpenProfile: () => void;
-  isAdminView: boolean;
-  setIsAdminView: (val: boolean) => void;
+  onClose: () => void;
 }
 
-export default function Navbar({
-  userProfile,
-  onOpenAuth,
-  onOpenWallet,
-  onOpenAdmin,
-  onOpenProfile,
-  isAdminView,
-  setIsAdminView
-}: NavbarProps) {
-  const [notifications, setNotifications] = useState<UserNotification[]>([]);
-  const [showNotifDropdown, setShowNotifDropdown] = useState(false);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+export default function WalletSection({ userProfile, onClose }: WalletSectionProps) {
+  const [transactions, setTransactions] = useState<WalletTransaction[]>([]);
+  const [activeTab, setActiveTab] = useState<'deposit' | 'withdraw'>('deposit');
+  const [amount, setAmount] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
 
   useEffect(() => {
-    if (!userProfile?.uid) {
-      setNotifications([]);
-      return;
-    }
+    if (!userProfile?.uid) return;
 
     const q = query(
-      collection(db, 'notifications'),
+      collection(db, 'transactions'),
       where('userId', '==', userProfile.uid)
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const notifs: UserNotification[] = [];
+      const txs: WalletTransaction[] = [];
       snapshot.forEach((doc) => {
-        notifs.push({ id: doc.id, ...doc.data() } as UserNotification);
+        txs.push({ id: doc.id, ...doc.data() } as WalletTransaction);
       });
       // Sort newest first
-      notifs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      setNotifications(notifs);
+      txs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setTransactions(txs);
     });
 
     return () => unsubscribe();
   }, [userProfile?.uid]);
 
-  const unreadCount = notifications.filter(n => !n.read).length;
+  const handleTransaction = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!userProfile?.uid) return;
 
-  const markAllAsRead = async () => {
-    if (!userProfile?.uid || notifications.length === 0) return;
+    setError('');
+    setSuccessMsg('');
+    const amt = parseFloat(amount);
+
+    if (isNaN(amt) || amt <= 0) {
+      setError('Please enter a valid positive amount.');
+      return;
+    }
+
+    setLoading(true);
+
     try {
-      const batch = writeBatch(db);
-      notifications.forEach((n) => {
-        if (!n.read) {
-          const docRef = doc(db, 'notifications', n.id);
-          batch.update(docRef, { read: true });
-        }
+      // 1. Call Secure server-side validation / anti-fraud endpoint
+      const response = await fetch('/api/wallet/verify-transaction', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: userProfile.uid,
+          type: activeTab,
+          amount: amt,
+          currentBalance: userProfile.walletBalance
+        })
       });
-      await batch.commit();
-    } catch (e) {
-      console.error('Error marking notifications as read:', e);
-    }
-  };
 
-  const clearAllNotifications = async () => {
-    if (!userProfile?.uid || notifications.length === 0) return;
-    try {
-      const batch = writeBatch(db);
-      notifications.forEach((n) => {
-        const docRef = doc(db, 'notifications', n.id);
-        batch.delete(docRef);
-      });
-      await batch.commit();
-    } catch (e) {
-      console.error('Error clearing notifications:', e);
-    }
-  };
+      const data = await response.json();
 
-  const markAsRead = async (id: string) => {
-    try {
-      await updateDoc(doc(db, 'notifications', id), { read: true });
-    } catch (e) {
-      console.error('Error marking notification as read:', e);
-    }
-  };
-
-  const handleLogout = async () => {
-    try {
-      // Update status to offline
-      if (userProfile?.uid) {
-        await updateDoc(doc(db, 'users', userProfile.uid), { status: 'offline' });
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Server rejected the transaction');
       }
-      await signOut(auth);
-    } catch (e) {
-      console.error('Logout error:', e);
+
+      // 2. Perform the update securely in Firestore using a transaction to prevent race conditions
+      const userRef = doc(db, 'users', userProfile.uid);
+      await runTransaction(db, async (transaction) => {
+        const userDoc = await transaction.get(userRef);
+        if (!userDoc.exists()) {
+          throw new Error("User profile not found.");
+        }
+        
+        const currentBalance = userDoc.data().walletBalance || 0;
+        if (activeTab === 'withdraw' && currentBalance < amt) {
+          throw new Error("Insufficient balance for withdrawal.");
+        }
+        
+        const newBalance = activeTab === 'deposit' 
+          ? currentBalance + amt 
+          : currentBalance - amt;
+          
+        transaction.update(userRef, { walletBalance: newBalance });
+      });
+
+      // 3. Save the Transaction history doc
+      await addDoc(collection(db, 'transactions'), {
+        userId: userProfile.uid,
+        username: userProfile.username,
+        type: activeTab,
+        amount: amt,
+        status: 'completed',
+        createdAt: new Date().toISOString()
+      });
+
+      // 4. Save a Notification doc
+      await addDoc(collection(db, 'notifications'), {
+        userId: userProfile.uid,
+        title: activeTab === 'deposit' ? 'Deposit Completed' : 'Withdrawal Completed',
+        message: activeTab === 'deposit' 
+          ? `Successfully deposited $${amt.toFixed(2)} into your available balance.`
+          : `Successfully withdrew $${amt.toFixed(2)} from your wallet balance.`,
+        type: activeTab === 'deposit' ? 'deposit_completed' : 'withdrawal_completed',
+        read: false,
+        createdAt: new Date().toISOString()
+      });
+
+      setSuccessMsg(`Transaction successful! $${amt.toFixed(2)} processed.`);
+      setAmount('');
+    } catch (err: any) {
+      setError(err.message || 'Transaction failed. Please try again.');
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <nav className="border-b border-zinc-800 bg-zinc-950/80 backdrop-blur-md sticky top-0 z-40 px-6 py-4">
-      <div className="max-w-7xl mx-auto flex items-center justify-between">
-        {/* Logo and Name */}
-        <div className="flex items-center gap-2 cursor-pointer" onClick={onOpenProfile}>
-          <div className="w-9 h-9 bg-white text-black flex items-center justify-center font-display font-bold text-xl rounded-lg">
-            ♞
+    <div className="bg-zinc-950 min-h-screen py-8 px-6 text-white font-sans">
+      <div className="max-w-4xl mx-auto space-y-8">
+        
+        {/* Header Section */}
+        <div className="flex justify-between items-center">
+          <div>
+            <h1 className="font-display font-bold text-3xl tracking-tight">Financial Hub</h1>
+            <p className="text-zinc-500 text-sm mt-1">Manage deposits, withdrawals and view live high-stakes ledger</p>
           </div>
-          <div className="flex flex-col">
-            <span className="font-display font-bold text-lg tracking-tight text-white leading-none">ChessArena</span>
-            <span className="text-[10px] text-zinc-500 font-semibold tracking-widest uppercase mt-0.5">High Stakes</span>
-          </div>
-        </div>
-
-        {/* Desktop Menu */}
-        <div className="hidden md:flex items-center gap-6">
-          {userProfile ? (
-            <>
-              {/* ELO Rating Badge */}
-              <div 
-                id="navbar-elo-badge"
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-sm text-zinc-300 cursor-pointer hover:border-zinc-700 transition"
-                onClick={onOpenProfile}
-              >
-                <Award size={16} className="text-zinc-400" />
-                <span className="font-semibold text-white">{userProfile.elo}</span>
-                <span className="text-xs text-zinc-500">ELO</span>
-              </div>
-
-              {/* Wallet Quick Look */}
-              <div 
-                id="navbar-wallet-btn"
-                onClick={onOpenWallet}
-                className="flex items-center gap-2 px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 rounded-lg text-sm transition cursor-pointer"
-              >
-                <Wallet size={16} className="text-green-400" />
-                <span className="font-medium text-zinc-300">Wallet:</span>
-                <span className="font-bold text-green-400">${userProfile.walletBalance.toFixed(2)}</span>
-              </div>
-
-              {/* Admin Toggle */}
-              {userProfile.isAdmin && (
-                <button 
-                  id="navbar-admin-toggle"
-                  onClick={() => setIsAdminView(!isAdminView)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 border rounded-lg text-sm font-semibold transition ${
-                    isAdminView 
-                      ? 'bg-red-950/40 border-red-800 text-red-200' 
-                      : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-700'
-                  }`}
-                >
-                  <ShieldAlert size={16} />
-                  <span>{isAdminView ? 'Exit Admin' : 'Admin Area'}</span>
-                </button>
-              )}
-
-              {/* Notifications bell */}
-              <div className="relative">
-                <button 
-                  id="navbar-notifications-bell"
-                  onClick={() => setShowNotifDropdown(!showNotifDropdown)}
-                  className="p-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-lg text-zinc-400 hover:text-white transition relative"
-                >
-                  <Bell size={18} />
-                  {unreadCount > 0 && (
-                    <span className="absolute -top-1 -right-1 w-4 h-4 bg-white text-black font-sans font-bold text-[9px] rounded-full flex items-center justify-center animate-pulse">
-                      {unreadCount}
-                    </span>
-                  )}
-                </button>
-
-                {/* Notifications Dropdown */}
-                {showNotifDropdown && (
-                  <div className="absolute right-0 mt-2 w-80 bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl z-50 overflow-hidden">
-                    <div className="p-3 border-b border-zinc-800 flex items-center justify-between">
-                      <span className="text-xs font-bold text-white uppercase tracking-wider">Notifications</span>
-                      <div className="flex gap-2 text-[10px]">
-                        <button onClick={markAllAsRead} className="text-zinc-400 hover:text-white flex items-center gap-1 font-semibold">
-                          <Check size={12} /> Read All
-                        </button>
-                        <button onClick={clearAllNotifications} className="text-zinc-500 hover:text-red-400 flex items-center gap-1 font-semibold">
-                          <Trash2 size={12} /> Clear
-                        </button>
-                      </div>
-                    </div>
-                    <div className="max-h-64 overflow-y-auto divide-y divide-zinc-800/50">
-                      {notifications.length === 0 ? (
-                        <div className="p-8 text-center text-xs text-zinc-500 font-medium">
-                          No recent alerts or notifications.
-                        </div>
-                      ) : (
-                        notifications.map((n) => (
-                          <div 
-                            key={n.id} 
-                            onClick={() => markAsRead(n.id)}
-                            className={`p-3 text-xs transition cursor-pointer hover:bg-zinc-950 ${!n.read ? 'bg-zinc-950/40 border-l-2 border-white' : ''}`}
-                          >
-                            <div className="flex justify-between items-start mb-0.5">
-                              <span className="font-semibold text-zinc-200">{n.title}</span>
-                              <span className="text-[9px] text-zinc-600">{new Date(n.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                            </div>
-                            <p className="text-zinc-400 leading-snug">{n.message}</p>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Profile Shortcut */}
-              <div 
-                id="navbar-profile-shortcut"
-                onClick={onOpenProfile}
-                className="flex items-center gap-2 pl-2 border-l border-zinc-800 cursor-pointer"
-              >
-                <div className="w-8 h-8 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center font-bold text-white">
-                  {userProfile.username[0].toUpperCase()}
-                </div>
-                <div className="flex flex-col">
-                  <span className="text-xs font-semibold text-white leading-none">{userProfile.username}</span>
-                  <span className="text-[10px] text-zinc-500 mt-0.5 flex items-center gap-0.5">
-                    <Globe size={10} /> {userProfile.country || 'US'}
-                  </span>
-                </div>
-              </div>
-
-              {/* Sign Out */}
-              <button 
-                id="navbar-logout-btn"
-                onClick={handleLogout}
-                className="p-2 bg-zinc-900/50 hover:bg-red-950/20 hover:text-red-400 border border-zinc-800 rounded-lg text-zinc-400 transition"
-                title="Log Out"
-              >
-                <LogOut size={16} />
-              </button>
-            </>
-          ) : (
-            <button 
-              id="navbar-signin-btn"
-              onClick={onOpenAuth}
-              className="px-5 py-2 bg-white text-black text-sm font-semibold rounded-lg hover:bg-zinc-200 transition"
-            >
-              Sign In
-            </button>
-          )}
-        </div>
-
-        {/* Mobile Menu Button */}
-        <div className="md:hidden flex items-center gap-3">
-          {userProfile && (
-            <div className="relative">
-              <button 
-                id="mobile-notif-btn"
-                onClick={() => setShowNotifDropdown(!showNotifDropdown)}
-                className="p-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-400 relative"
-              >
-                <Bell size={16} />
-                {unreadCount > 0 && (
-                  <span className="absolute -top-1 -right-1 w-3 h-3 bg-white text-black font-sans font-bold text-[8px] rounded-full flex items-center justify-center">
-                    {unreadCount}
-                  </span>
-                )}
-              </button>
-              {showNotifDropdown && (
-                <div className="absolute right-0 mt-2 w-72 bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl z-50 overflow-hidden">
-                  <div className="p-2.5 border-b border-zinc-800 flex items-center justify-between">
-                    <span className="text-xs font-bold text-white">Alerts</span>
-                    <button onClick={markAllAsRead} className="text-[10px] text-zinc-400 font-semibold">Mark read</button>
-                  </div>
-                  <div className="max-h-48 overflow-y-auto divide-y divide-zinc-800/50">
-                    {notifications.length === 0 ? (
-                      <div className="p-6 text-center text-xs text-zinc-500">No alerts</div>
-                    ) : (
-                      notifications.map((n) => (
-                        <div key={n.id} onClick={() => markAsRead(n.id)} className="p-2.5 text-xs">
-                          <div className="font-semibold text-zinc-200">{n.title}</div>
-                          <p className="text-zinc-400 text-[11px] leading-tight mt-0.5">{n.message}</p>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
           <button 
-            id="mobile-menu-toggle"
-            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-            className="p-2 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-400"
+            id="wallet-back-btn"
+            onClick={onClose}
+            className="px-4 py-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-lg text-sm text-zinc-400 hover:text-white transition cursor-pointer"
           >
-            {mobileMenuOpen ? <X size={20} /> : <Menu size={20} />}
+            ← Back to Lobby
           </button>
         </div>
-      </div>
 
-      {/* Mobile Drawer */}
-      {mobileMenuOpen && (
-        <div className="md:hidden mt-4 pt-4 border-t border-zinc-800 flex flex-col gap-3">
-          {userProfile ? (
-            <>
-              <div className="flex items-center justify-between px-2">
-                <span className="text-sm font-semibold text-white">{userProfile.username}</span>
-                <span className="text-xs font-bold text-zinc-500">{userProfile.elo} ELO</span>
-              </div>
-              <button 
-                onClick={() => { onOpenWallet(); setMobileMenuOpen(false); }}
-                className="w-full py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-300 flex items-center justify-center gap-2 text-sm font-semibold"
-              >
-                <Wallet size={16} className="text-green-400" />
-                <span>Wallet: ${userProfile.walletBalance.toFixed(2)}</span>
-              </button>
-              {userProfile.isAdmin && (
-                <button 
-                  onClick={() => { setIsAdminView(!isAdminView); setMobileMenuOpen(false); }}
-                  className="w-full py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-red-200 flex items-center justify-center gap-2 text-sm font-semibold"
-                >
-                  <ShieldAlert size={16} />
-                  <span>{isAdminView ? 'Exit Admin Mode' : 'Enter Admin Mode'}</span>
-                </button>
-              )}
-              <button 
-                onClick={() => { onOpenProfile(); setMobileMenuOpen(false); }}
-                className="w-full py-2 bg-zinc-950 hover:bg-zinc-900 border border-zinc-800 text-zinc-400 rounded-lg text-sm"
-              >
-                Profile Statistics
-              </button>
-              <button 
-                onClick={handleLogout}
-                className="w-full py-2.5 bg-red-950/20 border border-red-900/40 text-red-300 rounded-lg text-sm font-semibold"
-              >
-                Sign Out
-              </button>
-            </>
-          ) : (
-            <button 
-              onClick={() => { onOpenAuth(); setMobileMenuOpen(false); }}
-              className="w-full py-2.5 bg-white text-black rounded-lg text-sm font-semibold"
-            >
-              Sign In / Sign Up
-            </button>
-          )}
+        {/* Dashboard Balance Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="bg-zinc-900 border border-zinc-800 p-6 rounded-2xl relative overflow-hidden shadow-xl">
+            <div className="absolute top-0 right-0 p-4 opacity-5">
+              <TrendingUp size={120} />
+            </div>
+            <span className="text-zinc-500 text-xs font-semibold uppercase tracking-wider">Available Balance</span>
+            <div className="mt-2 text-3xl font-display font-bold text-white flex items-baseline gap-1.5">
+              <span>${userProfile?.walletBalance?.toFixed(2) || '0.00'}</span>
+              <span className="text-sm text-zinc-400 font-sans font-medium">USD</span>
+            </div>
+            <p className="text-zinc-500 text-xs mt-3 flex items-center gap-1">
+              <ShieldCheck size={14} className="text-green-500" />
+              Fully secured and backed by Instant Transfer Protocol.
+            </p>
+          </div>
+
+          <div className="bg-zinc-900 border border-zinc-800 p-6 rounded-2xl relative overflow-hidden shadow-xl">
+            <div className="absolute top-0 right-0 p-4 opacity-5">
+              <TrendingDown size={120} />
+            </div>
+            <span className="text-zinc-500 text-xs font-semibold uppercase tracking-wider">Pending / Escrow Balance</span>
+            <div className="mt-2 text-3xl font-display font-bold text-zinc-400 flex items-baseline gap-1.5">
+              <span>$0.00</span>
+              <span className="text-sm text-zinc-500 font-sans font-medium">USD</span>
+            </div>
+            <p className="text-zinc-500 text-xs mt-3 flex items-center gap-1">
+              <Clock size={14} className="text-zinc-500" />
+              Held securely inside active match pools.
+            </p>
+          </div>
         </div>
-      )}
-    </nav>
+
+        {/* Transaction Actions and Ledger split */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          
+          {/* Action Form */}
+          <div className="lg:col-span-1 bg-zinc-900 border border-zinc-800 rounded-2xl p-6 h-fit shadow-lg">
+            <div className="flex border-b border-zinc-800 mb-6">
+              <button 
+                id="btn-tab-deposit"
+                onClick={() => { setActiveTab('deposit'); setError(''); setSuccessMsg(''); }}
+                className={`w-1/2 pb-3 text-sm font-semibold border-b-2 transition ${activeTab === 'deposit' ? 'border-white text-white' : 'border-transparent text-zinc-500'}`}
+              >
+                Deposit
+              </button>
+              <button 
+                id="btn-tab-withdraw"
+                onClick={() => { setActiveTab('withdraw'); setError(''); setSuccessMsg(''); }}
+                className={`w-1/2 pb-3 text-sm font-semibold border-b-2 transition ${activeTab === 'withdraw' ? 'border-white text-white' : 'border-transparent text-zinc-500'}`}
+              >
+                Withdraw
+              </button>
+            </div>
+
+            {error && (
+              <div className="mb-4 p-3 bg-red-950/40 border border-red-800 rounded-lg flex items-center gap-2 text-red-200 text-xs">
+                <AlertCircle size={16} />
+                <span>{error}</span>
+              </div>
+            )}
+
+            {successMsg && (
+              <div className="mb-4 p-3 bg-green-950/40 border border-green-800 rounded-lg flex items-center gap-2 text-green-200 text-xs">
+                <CheckCircle2 size={16} />
+                <span>{successMsg}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleTransaction} className="space-y-4">
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-zinc-400">Amount (USD)</label>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500 font-bold">$</span>
+                  <input 
+                    id="wallet-amount-input"
+                    type="number"
+                    step="0.01"
+                    min="1"
+                    required
+                    placeholder="15.00"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    className="w-full pl-8 pr-4 py-3 bg-zinc-950 border border-zinc-800 rounded-xl text-white focus:outline-none focus:border-zinc-500 transition-all placeholder:text-zinc-700 font-mono font-bold"
+                  />
+                </div>
+              </div>
+
+              {activeTab === 'deposit' ? (
+                <div className="p-3.5 bg-zinc-950 rounded-lg border border-zinc-800 text-[11px] text-zinc-500 leading-relaxed">
+                  You are depositing mock funds. Our backend verifies with anti-fraud telemetry score to approve instant credits.
+                </div>
+              ) : (
+                <div className="p-3.5 bg-zinc-950 rounded-lg border border-zinc-800 text-[11px] text-zinc-500 leading-relaxed">
+                  Withdrawal requests are processed immediately. Verification checks ELO rating integrity.
+                </div>
+              )}
+
+              <button 
+                id="wallet-submit-btn"
+                type="submit"
+                disabled={loading}
+                className="w-full py-3.5 bg-white hover:bg-zinc-200 text-black font-semibold rounded-xl transition text-sm flex items-center justify-center disabled:opacity-50 cursor-pointer"
+              >
+                {loading ? 'Processing Securely...' : activeTab === 'deposit' ? 'Deposit Instantly' : 'Withdraw Instantly'}
+              </button>
+            </form>
+          </div>
+
+          {/* Ledger Table */}
+          <div className="lg:col-span-2 bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-lg">
+            <h3 className="font-display font-semibold text-lg text-white mb-4">Financial Ledger</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs text-zinc-400">
+                <thead>
+                  <tr className="border-b border-zinc-800 text-zinc-500 font-semibold uppercase tracking-wider pb-3">
+                    <th className="pb-3">Type</th>
+                    <th className="pb-3">Amount</th>
+                    <th className="pb-3">Status</th>
+                    <th className="pb-3">Timestamp</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/40">
+                  {transactions.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="py-8 text-center text-zinc-500 font-medium">
+                        No transactions recorded. Complete a deposit to start.
+                      </td>
+                    </tr>
+                  ) : (
+                    transactions.map((t) => (
+                      <tr key={t.id} className="hover:bg-zinc-950/40 transition">
+                        <td className="py-3 flex items-center gap-1.5 font-semibold text-zinc-200">
+                          {t.type === 'deposit' && (
+                            <>
+                              <ArrowDownLeft size={14} className="text-green-400" />
+                              <span>Deposit</span>
+                            </>
+                          )}
+                          {t.type === 'withdrawal' && (
+                            <>
+                              <ArrowUpRight size={14} className="text-zinc-400" />
+                              <span>Withdrawal</span>
+                            </>
+                          )}
+                          {t.type === 'entry_fee' && (
+                            <>
+                              <TrendingDown size={14} className="text-red-400" />
+                              <span>Match Entry Fee</span>
+                            </>
+                          )}
+                          {t.type === 'prize_win' && (
+                            <>
+                              <TrendingUp size={14} className="text-green-400" />
+                              <span>Match Prize Win</span>
+                            </>
+                          )}
+                          {t.type === 'platform_fee' && (
+                            <>
+                              <TrendingDown size={14} className="text-zinc-500" />
+                              <span>Service Fee</span>
+                            </>
+                          )}
+                        </td>
+                        <td className={`py-3 font-mono font-bold ${
+                          t.type === 'deposit' || t.type === 'prize_win' 
+                            ? 'text-green-400' 
+                            : 'text-zinc-300'
+                        }`}>
+                          {t.type === 'deposit' || t.type === 'prize_win' ? '+' : '-'}${(t.amount ?? 0).toFixed(2)}
+                        </td>
+                        <td className="py-3">
+                          <span className={`px-2 py-0.5 rounded-full font-sans font-semibold text-[9px] ${
+                            t.status === 'completed' 
+                              ? 'bg-green-950 text-green-400' 
+                              : t.status === 'pending'
+                              ? 'bg-zinc-800 text-zinc-400'
+                              : 'bg-red-950 text-red-400'
+                          }`}>
+                            {t.status}
+                          </span>
+                        </td>
+                        <td className="py-3 text-zinc-500 font-medium">
+                          {new Date(t.createdAt).toLocaleString()}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+    </div>
   );
 }
