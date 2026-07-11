@@ -1,7 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import * as firestoreSDK from 'firebase/firestore';
 import * as authSDK from 'firebase/auth';
-import { GoogleAuthProvider } from 'firebase/auth';
 
 const firebaseConfig: any = {
   apiKey: (import.meta as any).env?.VITE_FIREBASE_API_KEY || "remixed-api-key",
@@ -33,13 +32,13 @@ if (!isMockMode) {
   }
 }
 
-// Export basic tools to fix Navbar and other components
+// 1. Core Exports
 export { realApp, realDb, realAuth };
 export const db: any = realDb;
 export const auth: any = realAuth;
-export const googleProvider: any = new GoogleAuthProvider();
+export const googleProvider: any = new authSDK.GoogleAuthProvider();
 
-// Re-export Firestore functions to avoid missing export errors
+// 2. All Common Firestore Functions (To fix any missing component imports)
 export const collection = firestoreSDK.collection;
 export const query = firestoreSDK.query;
 export const where = firestoreSDK.where;
@@ -47,4 +46,16 @@ export const onSnapshot = firestoreSDK.onSnapshot;
 export const doc = firestoreSDK.doc;
 export const updateDoc = firestoreSDK.updateDoc;
 export const addDoc = firestoreSDK.addDoc;
+export const setDoc = firestoreSDK.setDoc;
+export const getDoc = firestoreSDK.getDoc;
+export const getDocs = firestoreSDK.getDocs;
+export const deleteDoc = firestoreSDK.deleteDoc;
+export const orderBy = firestoreSDK.orderBy;
+export const limit = firestoreSDK.limit;
 export const runTransaction = firestoreSDK.runTransaction;
+
+// 3. All Common Authentication Functions
+export const signInWithPopup = authSDK.signInWithPopup;
+export const signOut = authSDK.signOut;
+export const onAuthStateChanged = authSDK.onAuthStateChanged;
+export const GoogleAuthProvider = authSDK.GoogleAuthProvider;
