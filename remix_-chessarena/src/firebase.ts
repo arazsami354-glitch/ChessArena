@@ -32,13 +32,11 @@ if (!isMockMode) {
   }
 }
 
-// 1. Core Exports
 export { realApp, realDb, realAuth };
 export const db: any = realDb;
 export const auth: any = realAuth;
 export const googleProvider: any = new authSDK.GoogleAuthProvider();
 
-// 2. All Common Firestore Functions (To fix any missing component imports)
 export const collection = firestoreSDK.collection;
 export const query = firestoreSDK.query;
 export const where = firestoreSDK.where;
@@ -54,7 +52,6 @@ export const orderBy = firestoreSDK.orderBy;
 export const limit = firestoreSDK.limit;
 export const runTransaction = firestoreSDK.runTransaction;
 
-// 3. All Common Authentication Functions
 export const signInWithPopup = authSDK.signInWithPopup;
 export const signOut = authSDK.signOut;
 export const onAuthStateChanged = authSDK.onAuthStateChanged;
