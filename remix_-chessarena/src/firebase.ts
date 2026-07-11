@@ -3,16 +3,21 @@ import * as firestoreSDK from 'firebase/firestore';
 import * as authSDK from 'firebase/auth';
 import { GoogleAuthProvider } from 'firebase/auth';
 
-// قراءة مباشرة وآمنة لمتغيرات البيئة تناسب محرك بناء Vite
-const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "remixed-api-key",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "remixed-auth-domain",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "remixed-project-id",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "remixed-app-id",
-  firestoreDatabaseId: import.meta.env.VITE_FIREBASE_DATABASE_ID || "remixed-firestore-database-id"
+// قراءة آمنة لبيئة العمل لتجنب أي أخطاء أثناء الـ Build في Vercel
+const getEnvVariable = (key: string): string => {
+  const env = (import.meta as any).env || {};
+  return env[key] || '';
 };
 
-// تشغيل الـ Matchmaking الحقيقي فقط إذا تغير الـ Project ID عن القيمة الافتراضية
+const firebaseConfig = {
+  apiKey: getEnvVariable('VITE_FIREBASE_API_KEY') || "remixed-api-key",
+  authDomain: getEnvVariable('VITE_FIREBASE_AUTH_DOMAIN') || "remixed-auth-domain",
+  projectId: getEnvVariable('VITE_FIREBASE_PROJECT_ID') || "remixed-project-id",
+  appId: getEnvVariable('VITE_FIREBASE_APP_ID') || "remixed-app-id",
+  firestoreDatabaseId: getEnvVariable('VITE_FIREBASE_DATABASE_ID') || "remixed-firestore-database-id"
+};
+
+// التحقق من نمط المحاكاة أو الربط الحقيقي
 export const isMockMode = firebaseConfig.projectId === "remixed-project-id";
 
 let realApp: any = null;
@@ -35,6 +40,7 @@ if (!isMockMode) {
   }
 }
 
+// التصدير الآمن لجميع المتغيرات التي تحتاجها باقي ملفات اللعبة
 export { realApp, realDb, realAuth };
 export const db = realDb;
 export const auth = realAuth;
