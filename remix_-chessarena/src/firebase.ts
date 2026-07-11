@@ -33,7 +33,18 @@ if (!isMockMode) {
   }
 }
 
+// Export basic tools to fix Navbar and other components
 export { realApp, realDb, realAuth };
 export const db: any = realDb;
 export const auth: any = realAuth;
 export const googleProvider: any = new GoogleAuthProvider();
+
+// Re-export Firestore functions to avoid missing export errors
+export const collection = firestoreSDK.collection;
+export const query = firestoreSDK.query;
+export const where = firestoreSDK.where;
+export const onSnapshot = firestoreSDK.onSnapshot;
+export const doc = firestoreSDK.doc;
+export const updateDoc = firestoreSDK.updateDoc;
+export const addDoc = firestoreSDK.addDoc;
+export const runTransaction = firestoreSDK.runTransaction;
